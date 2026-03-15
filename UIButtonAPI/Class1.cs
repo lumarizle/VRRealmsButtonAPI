@@ -3,10 +3,9 @@ using MelonLoader;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.Events;
-using TMPro;
 using Photon.Pun;
 
-[assembly: MelonInfo(typeof(UIButtonAPI.UIButtonAPI), "UIButtonAPI", "1.0.0", "Lumarizle + AI")]
+[assembly: MelonInfo(typeof(UIButtonAPI.UIButtonAPI), "UIButtonAPI", "2.0.0", "Lumarizle + AI")]
 [assembly: MelonGame]
 
 namespace UIButtonAPI
@@ -17,34 +16,47 @@ namespace UIButtonAPI
         //
         // Subscribe from anywhere in your mod after OnUIReady fires:
         //
-        //   UIButtonAPI.OnUIReady          += SetupMyUI;
-        //   UIButtonAPI.OnUIButtonClick[1]  += MyButtonHandler;
-        //   UIButtonAPI.OnUIToggleChange[1] += isOn => MelonLogger.Msg(isOn);
-        //   UIButtonAPI.OnUISliderChange[1] += val  => MelonLogger.Msg(val);
+        //   UIButtonAPI.OnUIReady              += SetupMyUI;
+        //   UIButtonAPI.OnUIButtonClick[1]     += MyButtonHandler;
+        //   UIButtonAPI.OnUIToggleChange[1]    += isOn => MelonLogger.Msg(isOn);
+        //
+        // Grid coordinates: (0,0) = Top-Left, (3,2) = Bottom-Right
+        // X range: 0–3, Y range: 0–2  (420 units per cell, negatives allowed)
+        // Maps to Unity local positions: X = -630 + gridX * 420,  Y = 1471.6 - gridY * 420
         //
         public static UnityEvent OnUIReady = new UnityEvent();
         public static Dictionary<int, UnityEvent> OnUIButtonClick = new Dictionary<int, UnityEvent>();
         public static Dictionary<int, UnityEvent<bool>> OnUIToggleChange = new Dictionary<int, UnityEvent<bool>>();
-        public static Dictionary<int, UnityEvent<float>> OnUISliderChange = new Dictionary<int, UnityEvent<float>>();
 
         // ── Internal References ────────────────────────────────────────
         private static GameObject _localPlayer;
         private static GameObject _instantiatedMenu;
-        private static GameObject _instantiatedTab;
+        private static Transform _shortcutMenu;
         private static bool _uiBuilt = false;
 
-        // Cached prefabs – loaded once in BuildUI, reused by API calls
-        private static GameObject _rowPrefab;
+        // Cached prefabs
         private static GameObject _btnPrefab;
         private static GameObject _togglePrefab;
-        private static GameObject _sliderPrefab;
+
+        // ── Sub-menu system ────────────────────────────────────────────
+        private static Dictionary<int, GameObject> _subMenus = new Dictionary<int, GameObject>();
+        private static GameObject _activeSubMenu = null;
+
+        // ── Grid → Unity coordinate conversion constants ───────────────
+        // Grid is 3×2 (indices 0–3 on X, 0–2 on Y), 420 units per cell.
+        // (0,0)=Top-Left=(-630, 1471.6)  step=420 on both axes.
+        // Negative indices and out-of-bounds indices are allowed.
+        private const float GridOriginX = -630f;
+        private const float GridOriginY = 1471.6f;
+        private const float GridStepX = 420f;
+        private const float GridStepY = -420f;
 
         // ──────────────────────────────────────────────────────────────
         #region MelonLoader Callbacks
 
         public override void OnApplicationStart()
         {
-            MelonLogger.Msg("UIButtonAPI loaded.");
+            MelonLogger.Msg("UIButtonAPI v2.0 loaded.");
         }
 
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
@@ -52,17 +64,15 @@ namespace UIButtonAPI
             _uiBuilt = false;
             _localPlayer = null;
             _instantiatedMenu = null;
-            _instantiatedTab = null;
-            _rowPrefab = null;
+            _shortcutMenu = null;
             _btnPrefab = null;
             _togglePrefab = null;
-            _sliderPrefab = null;
+            _subMenus.Clear();
+            _activeSubMenu = null;
 
-            // Clear event tables on scene reload so IDs don't pile up
             OnUIReady = new UnityEvent();
             OnUIButtonClick.Clear();
             OnUIToggleChange.Clear();
-            OnUISliderChange.Clear();
 
             MelonCoroutines.Start(PollForLocalPlayer());
         }
@@ -105,80 +115,73 @@ namespace UIButtonAPI
 
         private static void BuildUI()
         {
-            // ── Find Tabs + QuickMenu_Modern ────────────────────────────
-            Transform tabsTransform = _localPlayer.transform.Find(
-                "Camera Offset/UI/Menu_Small/QM/QuickMenu_Modern/Tabs"
+            // ── Find QuickMenu ──────────────────────────────────────────
+            Transform quickMenu = _localPlayer.transform.Find(
+                "Camera Offset/UI/Menu_Small/QM/QuickMenu"
             );
 
-            if (tabsTransform == null)
+            if (quickMenu == null)
             {
-                MelonLogger.Warning("UIButtonAPI: Could not find Tabs under local player.");
+                MelonLogger.Warning("UIButtonAPI: Could not find QuickMenu under local player.");
                 return;
             }
 
-            Transform quickMenuModern = tabsTransform.parent;
+            // ── Find ShortcutMenu ───────────────────────────────────────
+            _shortcutMenu = _localPlayer.transform.Find(
+                "Camera Offset/UI/Menu_Small/QM/QuickMenu/ShortcutMenu"
+            );
 
-            // ── Load all prefabs ────────────────────────────────────────
-            GameObject tabPrefab = Resources.Load<GameObject>("Desktop_UIMenuTab");
-            GameObject menuPrefab = Resources.Load<GameObject>("Desktop_UIMenu");
-            _rowPrefab = Resources.Load<GameObject>("Desktop_UIRow");
-            _btnPrefab = Resources.Load<GameObject>("Desktop_UIButtonPrefab");
-            _togglePrefab = Resources.Load<GameObject>("Desktop_UITogglePrefab");
-            _sliderPrefab = Resources.Load<GameObject>("Desktop_UISliderPrefab");
+            if (_shortcutMenu == null)
+                MelonLogger.Warning("UIButtonAPI: Could not find ShortcutMenu – shortcut button will be skipped.");
 
-            if (tabPrefab == null || menuPrefab == null || _rowPrefab == null ||
-                _btnPrefab == null || _togglePrefab == null || _sliderPrefab == null)
+            // ── Load prefabs ────────────────────────────────────────────
+            GameObject menuPrefab = Resources.Load<GameObject>("OLD_MENU");
+            _btnPrefab = Resources.Load<GameObject>("OLD_BUTTON");
+            _togglePrefab = Resources.Load<GameObject>("OLD_TOGGLE");
+
+            if (menuPrefab == null || _btnPrefab == null || _togglePrefab == null)
             {
                 MelonLogger.Warning("UIButtonAPI: One or more prefabs missing from Resources.");
-                MelonLogger.Msg($"  tab={tabPrefab != null} menu={menuPrefab != null} " +
-                                $"row={_rowPrefab != null} btn={_btnPrefab != null} " +
-                                $"toggle={_togglePrefab != null} slider={_sliderPrefab != null}");
+                MelonLogger.Msg($"  menu={menuPrefab != null}  btn={_btnPrefab != null}  toggle={_togglePrefab != null}");
                 return;
             }
 
-            // ── Instantiate menu panel ──────────────────────────────────
-            _instantiatedMenu = GameObject.Instantiate(menuPrefab, quickMenuModern);
-            _instantiatedMenu.transform.localPosition = Vector3.zero;
+            // ── Instantiate main menu panel (hidden by default) ─────────
+            _instantiatedMenu = GameObject.Instantiate(menuPrefab, quickMenu);
+            _instantiatedMenu.transform.localPosition = new Vector3(9.33f, -755.0295f, 0f);
+            _instantiatedMenu.SetActive(false);
 
-            Transform titleT = _instantiatedMenu.transform.Find("Title");
-            if (titleT != null)
+            // ── Shortcut button (Mods) in ShortcutMenu ──────────────────
+            if (_shortcutMenu != null)
             {
-                var tmp = titleT.GetComponent<TextMeshProUGUI>();
-                if (tmp != null) tmp.text = "UIButtonAPI";
+                GameObject shortcutBtn = GameObject.Instantiate(_btnPrefab, _shortcutMenu);
+                shortcutBtn.transform.localPosition = GridToUnity(-1, 0);
+                SetChildText(shortcutBtn, "ButtonText", "Mods");
+
+                var btnComp = shortcutBtn.GetComponent<Button>();
+                if (btnComp != null)
+                    btnComp.onClick.AddListener(() => OpenMainMenu());
+                else
+                    MelonLogger.Warning("UIButtonAPI: Shortcut button has no Button component.");
+
+                MelonLogger.Msg("UIButtonAPI: Shortcut button created in ShortcutMenu at grid (-1, 0).");
             }
 
-            // ── Instantiate tab ─────────────────────────────────────────
-            _instantiatedTab = GameObject.Instantiate(tabPrefab, tabsTransform);
-            SetZero(_instantiatedTab.transform);
+            // ── Back button at  in main menu ──────────────────────
+            // Outside the normal grid area — closes mod menu, restores ShortcutMenu.
+            GameObject backBtn = GameObject.Instantiate(_btnPrefab, _instantiatedMenu.transform);
+            backBtn.transform.localPosition = GridToUnity(3, 2);
+            SetChildText(backBtn, "ButtonText", "Back");
+            var backComp = backBtn.GetComponent<Button>();
+            if (backComp != null)
+                backComp.onClick.AddListener(() => CloseMainMenu());
+            MelonLogger.Msg("UIButtonAPI: Back button created");
 
-            var tabToggle = _instantiatedTab.GetComponent<Toggle>();
-            if (tabToggle != null)
-            {
-                var group = tabsTransform.GetComponent<ToggleGroup>();
-                if (group != null) tabToggle.group = group;
-            }
+            // ── Example layout (remove / change these as you like) ──────
+            MakeButton(0, 0, "Cool Button!", 1);
+            MakeToggle(1, 0, "My Toggle", 1);
 
-            var toggleObjScript = _instantiatedTab.GetComponent("ToggleObjectScript");
-            if (toggleObjScript != null)
-            {
-                var field = toggleObjScript.GetType().GetField(
-                    "targetObject",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance
-                );
-                field?.SetValue(toggleObjScript, _instantiatedMenu);
-            }
-
-            // ── Example UI layout ───────────────────────────────────────
-            // Feel free to remove or change these — they're just defaults.
-            GameObject row1 = MakeRow(0f, 95f);
-            MakeButton(row1, "Cool Button!", 1);
-            MakeToggle(row1, "My Toggle", 1);
-
-            // GameObject row2 = MakeRow(0f, 0f);
-            // MakeButton(row2, "Another Button", 2);
-            // MakeSlider(row2, "My Slider", 1, 0f, 100f);
-
-            // ── Fire OnUIReady so other code can add its own elements ───
+            // ── Fire OnUIReady ──────────────────────────────────────────
             _uiBuilt = true;
             MelonLogger.Msg("UIButtonAPI: UI built - firing OnUIReady.");
             OnUIReady?.Invoke();
@@ -187,49 +190,148 @@ namespace UIButtonAPI
         #endregion
 
         // ──────────────────────────────────────────────────────────────
-        #region Public UI API
+        #region Main Menu Open / Close
 
-        /// <summary>
-        /// Instantiates a Desktop_UIRow inside the menu at the given local XY position.
-        /// The row already has a Horizontal Layout Group in-game, so children space themselves.
-        /// Returns the row GameObject to pass into MakeButton / MakeToggle / MakeSlider.
-        /// </summary>
-        public static GameObject MakeRow(float posX, float posY)
+        private static void OpenMainMenu()
         {
-            if (_instantiatedMenu == null || _rowPrefab == null)
+            if (_activeSubMenu != null)
             {
-                MelonLogger.Warning("UIButtonAPI: MakeRow called before UI is ready.");
-                return null;
+                _activeSubMenu.SetActive(false);
+                _activeSubMenu = null;
             }
 
-            GameObject row = GameObject.Instantiate(_rowPrefab, _instantiatedMenu.transform);
-            row.transform.localPosition = new Vector3(posX, posY, 0f);
-            MelonLogger.Msg($"UIButtonAPI: MakeRow created at ({posX}, {posY})");
-            return row;
+            _instantiatedMenu.SetActive(true);
+            if (_shortcutMenu != null)
+                _shortcutMenu.gameObject.SetActive(false);
+
+            MelonLogger.Msg("UIButtonAPI: Main menu opened.");
+        }
+
+        private static void CloseMainMenu()
+        {
+            _instantiatedMenu.SetActive(false);
+            if (_shortcutMenu != null)
+                _shortcutMenu.gameObject.SetActive(true);
+
+            MelonLogger.Msg("UIButtonAPI: Main menu closed.");
+        }
+
+        #endregion
+
+        // ──────────────────────────────────────────────────────────────
+        #region Sub-Menu System
+
+        /// <summary>
+        /// Creates a new sub-menu panel and returns its ID.
+        /// The sub-menu is hidden by default. Use OpenSubMenu(id) to show it.
+        /// A Back button is added automatically, returning to the main menu.
+        ///
+        /// Example:
+        ///   // In OnUIReady handler:
+        ///   int movID = UIButtonAPI.CreateSubMenu("Movement");
+        ///
+        ///   UIButtonAPI.MakeButton(0, 0, "Movement", 1);
+        ///   UIButtonAPI.OnUIButtonClick[1] += () => UIButtonAPI.OpenSubMenu(movID);
+        ///
+        ///   UIButtonAPI.MakeToggleInSubMenu(movID, 0, 0, "No-Clip", 101);
+        ///   UIButtonAPI.OnUIToggleChange[101] += isOn => SetNoClip(isOn);
+        /// </summary>
+        public static int CreateSubMenu(string title)
+        {
+            if (_instantiatedMenu == null || _btnPrefab == null)
+            {
+                MelonLogger.Warning("UIButtonAPI: CreateSubMenu called before UI is ready.");
+                return -1;
+            }
+
+            GameObject menuPrefab = Resources.Load<GameObject>("OLD_MENU");
+            if (menuPrefab == null)
+            {
+                MelonLogger.Warning("UIButtonAPI: CreateSubMenu – OLD_MENU prefab missing.");
+                return -1;
+            }
+
+            // Parent to the same QuickMenu as the main menu
+            Transform parent = _instantiatedMenu.transform.parent;
+            GameObject sub = GameObject.Instantiate(menuPrefab, parent);
+            sub.transform.localPosition = new Vector3(9.33f, -755.0295f, 0f);
+            sub.SetActive(false);
+
+            // Unique ID: offset by 1000 to avoid colliding with button IDs
+            int id = 1000 + _subMenus.Count;
+            _subMenus[id] = sub;
+
+            // Auto Back button 
+            GameObject backBtn = GameObject.Instantiate(_btnPrefab, sub.transform);
+            backBtn.transform.localPosition = GridToUnity(3, 2);
+            SetChildText(backBtn, "ButtonText", "Back");
+            var backComp = backBtn.GetComponent<Button>();
+            if (backComp != null)
+                backComp.onClick.AddListener(() => CloseSubMenu());
+
+            MelonLogger.Msg($"UIButtonAPI: Sub-menu '{title}' created (subID={id}).");
+            return id;
         }
 
         /// <summary>
-        /// Instantiates a Desktop_UIButtonPrefab inside the given row.
-        /// Sets the ButtonText label and registers OnUIButtonClick[buttonID].
-        ///
-        /// Example:
-        ///   var row = MakeRow(0f, 95f);
-        ///   MakeButton(row, "Say Hi", 1);
-        ///   OnUIButtonClick[1] += () => MelonLogger.Msg("Hi!");
+        /// Opens a sub-menu, hiding the main menu.
+        /// Call with the ID returned from CreateSubMenu.
         /// </summary>
-        public static GameObject MakeButton(GameObject row, string text, int buttonID)
+        public static void OpenSubMenu(int subMenuID)
         {
-            if (row == null || _btnPrefab == null)
+            if (!_subMenus.TryGetValue(subMenuID, out GameObject sub))
             {
-                MelonLogger.Warning($"UIButtonAPI: MakeButton({buttonID}) – null row or missing prefab.");
+                MelonLogger.Warning($"UIButtonAPI: OpenSubMenu – unknown subMenuID {subMenuID}.");
+                return;
+            }
+
+            if (_activeSubMenu != null)
+                _activeSubMenu.SetActive(false);
+            else
+                _instantiatedMenu.SetActive(false);
+
+            sub.SetActive(true);
+            _activeSubMenu = sub;
+            MelonLogger.Msg($"UIButtonAPI: Opened sub-menu {subMenuID}.");
+        }
+
+        /// <summary>Closes the active sub-menu and returns to the main menu.</summary>
+        public static void CloseSubMenu()
+        {
+            if (_activeSubMenu != null)
+            {
+                _activeSubMenu.SetActive(false);
+                _activeSubMenu = null;
+            }
+
+            _instantiatedMenu.SetActive(true);
+            MelonLogger.Msg("UIButtonAPI: Closed sub-menu, returned to main menu.");
+        }
+
+        /// <summary>Returns the raw sub-menu GameObject for a given subMenuID, or null.</summary>
+        public static GameObject GetSubMenu(int subMenuID)
+        {
+            _subMenus.TryGetValue(subMenuID, out GameObject sub);
+            return sub;
+        }
+
+        /// <summary>
+        /// Instantiates an OLD_BUTTON inside a sub-menu at grid (gridX, gridY).
+        /// Uses the shared OnUIButtonClick event table.
+        /// </summary>
+        public static GameObject MakeButtonInSubMenu(int subMenuID, int gridX, int gridY, string text, int buttonID)
+        {
+            if (!_subMenus.TryGetValue(subMenuID, out GameObject sub))
+            {
+                MelonLogger.Warning($"UIButtonAPI: MakeButtonInSubMenu – unknown subMenuID {subMenuID}.");
                 return null;
             }
 
             if (!OnUIButtonClick.ContainsKey(buttonID))
                 OnUIButtonClick[buttonID] = new UnityEvent();
 
-            GameObject btn = GameObject.Instantiate(_btnPrefab, row.transform);
-            SetZero(btn.transform);
+            GameObject btn = GameObject.Instantiate(_btnPrefab, sub.transform);
+            btn.transform.localPosition = GridToUnity(gridX, gridY);
             SetChildText(btn, "ButtonText", text);
 
             var btnComp = btn.GetComponent<Button>();
@@ -238,42 +340,32 @@ namespace UIButtonAPI
                 int id = buttonID;
                 btnComp.onClick.AddListener(() =>
                 {
-                    MelonLogger.Msg($"UIButtonAPI: OnUIButtonClick{id} fired.");
+                    MelonLogger.Msg($"UIButtonAPI: OnUIButtonClick[{id}] fired (sub-menu).");
                     OnUIButtonClick[id]?.Invoke();
                 });
             }
-            else
-            {
-                MelonLogger.Warning($"UIButtonAPI: MakeButton({buttonID}) – no Button component on prefab.");
-            }
 
-            MelonLogger.Msg($"UIButtonAPI: MakeButton created (ID={buttonID}, text=\"{text}\")");
+            MelonLogger.Msg($"UIButtonAPI: MakeButtonInSubMenu (subID={subMenuID}, ID={buttonID}, grid=({gridX},{gridY}), text=\"{text}\")");
             return btn;
         }
 
         /// <summary>
-        /// Instantiates a Desktop_UITogglePrefab inside the given row.
-        /// Sets the ButtonText label and registers OnUIToggleChange[toggleID].
-        /// The event passes the new bool value: true = on, false = off.
-        ///
-        /// Example:
-        ///   var row = MakeRow(0f, 95f);
-        ///   MakeToggle(row, "God Mode", 1);
-        ///   OnUIToggleChange[1] += isOn => godModeEnabled = isOn;
+        /// Instantiates an OLD_TOGGLE inside a sub-menu at grid (gridX, gridY).
+        /// Uses the shared OnUIToggleChange event table.
         /// </summary>
-        public static GameObject MakeToggle(GameObject row, string text, int toggleID)
+        public static GameObject MakeToggleInSubMenu(int subMenuID, int gridX, int gridY, string text, int toggleID)
         {
-            if (row == null || _togglePrefab == null)
+            if (!_subMenus.TryGetValue(subMenuID, out GameObject sub))
             {
-                MelonLogger.Warning($"UIButtonAPI: MakeToggle({toggleID}) – null row or missing prefab.");
+                MelonLogger.Warning($"UIButtonAPI: MakeToggleInSubMenu – unknown subMenuID {subMenuID}.");
                 return null;
             }
 
             if (!OnUIToggleChange.ContainsKey(toggleID))
                 OnUIToggleChange[toggleID] = new UnityEvent<bool>();
 
-            GameObject toggleObj = GameObject.Instantiate(_togglePrefab, row.transform);
-            SetZero(toggleObj.transform);
+            GameObject toggleObj = GameObject.Instantiate(_togglePrefab, sub.transform);
+            toggleObj.transform.localPosition = GridToUnity(gridX, gridY);
             SetChildText(toggleObj, "ButtonText", text);
 
             var toggleComp = toggleObj.GetComponent<Toggle>();
@@ -282,7 +374,101 @@ namespace UIButtonAPI
                 int id = toggleID;
                 toggleComp.onValueChanged.AddListener((isOn) =>
                 {
-                    MelonLogger.Msg($"UIButtonAPI: OnUIToggleChange{id} fired (isOn={isOn}).");
+                    MelonLogger.Msg($"UIButtonAPI: OnUIToggleChange[{id}] fired (sub-menu, isOn={isOn}).");
+                    OnUIToggleChange[id]?.Invoke(isOn);
+                });
+            }
+
+            MelonLogger.Msg($"UIButtonAPI: MakeToggleInSubMenu (subID={subMenuID}, ID={toggleID}, grid=({gridX},{gridY}), text=\"{text}\")");
+            return toggleObj;
+        }
+
+        #endregion
+
+        // ──────────────────────────────────────────────────────────────
+        #region Public UI API
+
+        /// <summary>
+        /// Converts a grid cell (gridX, gridY) to a Unity local position.
+        /// (0,0) = Top-Left. Negatives and out-of-bounds values are fine.
+        /// </summary>
+        public static Vector3 GridToUnity(int gridX, int gridY)
+        {
+            float x = GridOriginX + gridX * GridStepX;
+            float y = GridOriginY + gridY * GridStepY;
+            return new Vector3(x, y, 0f);
+        }
+
+        /// <summary>
+        /// Instantiates an OLD_BUTTON in the main menu at grid (gridX, gridY).
+        ///
+        /// Example:
+        ///   MakeButton(0, 0, "Say Hi", 1);
+        ///   UIButtonAPI.OnUIButtonClick[1] += () => MelonLogger.Msg("Hi!");
+        /// </summary>
+        public static GameObject MakeButton(int gridX, int gridY, string text, int buttonID)
+        {
+            if (_instantiatedMenu == null || _btnPrefab == null)
+            {
+                MelonLogger.Warning($"UIButtonAPI: MakeButton({buttonID}) called before UI is ready.");
+                return null;
+            }
+
+            if (!OnUIButtonClick.ContainsKey(buttonID))
+                OnUIButtonClick[buttonID] = new UnityEvent();
+
+            GameObject btn = GameObject.Instantiate(_btnPrefab, _instantiatedMenu.transform);
+            btn.transform.localPosition = GridToUnity(gridX, gridY);
+            SetChildText(btn, "ButtonText", text);
+
+            var btnComp = btn.GetComponent<Button>();
+            if (btnComp != null)
+            {
+                int id = buttonID;
+                btnComp.onClick.AddListener(() =>
+                {
+                    MelonLogger.Msg($"UIButtonAPI: OnUIButtonClick[{id}] fired.");
+                    OnUIButtonClick[id]?.Invoke();
+                });
+            }
+            else
+            {
+                MelonLogger.Warning($"UIButtonAPI: MakeButton({buttonID}) – no Button component on prefab.");
+            }
+
+            MelonLogger.Msg($"UIButtonAPI: MakeButton created (ID={buttonID}, grid=({gridX},{gridY}), text=\"{text}\")");
+            return btn;
+        }
+
+        /// <summary>
+        /// Instantiates an OLD_TOGGLE in the main menu at grid (gridX, gridY).
+        ///
+        /// Example:
+        ///   MakeToggle(0, 1, "God Mode", 1);
+        ///   UIButtonAPI.OnUIToggleChange[1] += isOn => godModeEnabled = isOn;
+        /// </summary>
+        public static GameObject MakeToggle(int gridX, int gridY, string text, int toggleID)
+        {
+            if (_instantiatedMenu == null || _togglePrefab == null)
+            {
+                MelonLogger.Warning($"UIButtonAPI: MakeToggle({toggleID}) called before UI is ready.");
+                return null;
+            }
+
+            if (!OnUIToggleChange.ContainsKey(toggleID))
+                OnUIToggleChange[toggleID] = new UnityEvent<bool>();
+
+            GameObject toggleObj = GameObject.Instantiate(_togglePrefab, _instantiatedMenu.transform);
+            toggleObj.transform.localPosition = GridToUnity(gridX, gridY);
+            SetChildText(toggleObj, "ButtonText", text);
+
+            var toggleComp = toggleObj.GetComponent<Toggle>();
+            if (toggleComp != null)
+            {
+                int id = toggleID;
+                toggleComp.onValueChanged.AddListener((isOn) =>
+                {
+                    MelonLogger.Msg($"UIButtonAPI: OnUIToggleChange[{id}] fired (isOn={isOn}).");
                     OnUIToggleChange[id]?.Invoke(isOn);
                 });
             }
@@ -291,56 +477,8 @@ namespace UIButtonAPI
                 MelonLogger.Warning($"UIButtonAPI: MakeToggle({toggleID}) – no Toggle component on prefab.");
             }
 
-            MelonLogger.Msg($"UIButtonAPI: MakeToggle created (ID={toggleID}, text=\"{text}\")");
+            MelonLogger.Msg($"UIButtonAPI: MakeToggle created (ID={toggleID}, grid=({gridX},{gridY}), text=\"{text}\")");
             return toggleObj;
-        }
-
-        /// <summary>
-        /// Instantiates a Desktop_UISliderPrefab inside the given row.
-        /// Sets the ButtonText label, clamps the slider between min and max,
-        /// and registers OnUISliderChange[sliderID].
-        /// The event passes the current float value every time the slider moves.
-        ///
-        /// Example:
-        ///   var row = MakeRow(0f, 0f);
-        ///   MakeSlider(row, "Speed", 1, 0f, 10f);
-        ///   OnUISliderChange[1] += val => playerSpeed = val;
-        /// </summary>
-        public static GameObject MakeSlider(GameObject row, string text, int sliderID, float min, float max)
-        {
-            if (row == null || _sliderPrefab == null)
-            {
-                MelonLogger.Warning($"UIButtonAPI: MakeSlider({sliderID}) – null row or missing prefab.");
-                return null;
-            }
-
-            if (!OnUISliderChange.ContainsKey(sliderID))
-                OnUISliderChange[sliderID] = new UnityEvent<float>();
-
-            GameObject sliderObj = GameObject.Instantiate(_sliderPrefab, row.transform);
-            SetZero(sliderObj.transform);
-            SetChildText(sliderObj, "ButtonText", text);
-
-            var sliderComp = sliderObj.GetComponent<Slider>();
-            if (sliderComp != null)
-            {
-                sliderComp.minValue = min;
-                sliderComp.maxValue = max;
-
-                int id = sliderID;
-                sliderComp.onValueChanged.AddListener((val) =>
-                {
-                    MelonLogger.Msg($"UIButtonAPI: OnUISliderChange{id} fired (value={val}).");
-                    OnUISliderChange[id]?.Invoke(val);
-                });
-            }
-            else
-            {
-                MelonLogger.Warning($"UIButtonAPI: MakeSlider({sliderID}) – no Slider component on prefab.");
-            }
-
-            MelonLogger.Msg($"UIButtonAPI: MakeSlider created (ID={sliderID}, text=\"{text}\", min={min}, max={max})");
-            return sliderObj;
         }
 
         #endregion
@@ -348,15 +486,10 @@ namespace UIButtonAPI
         // ──────────────────────────────────────────────────────────────
         #region Helpers
 
-        /// <summary>Sets only the Z component of localPosition to 0.</summary>
-        private static void SetZero(Transform t)
-        {
-            var lp = t.localPosition;
-            lp.z = 0f;
-            t.localPosition = lp;
-        }
-
-        /// <summary>Finds a named child and sets its TextMeshProUGUI text.</summary>
+        /// <summary>
+        /// Finds a named child and sets its legacy Unity Text component.
+        /// (ButtonText uses legacy Text, not TextMeshProUGUI, as of the game update.)
+        /// </summary>
         private static void SetChildText(GameObject parent, string childName, string text)
         {
             Transform t = parent.transform.Find(childName);
@@ -365,11 +498,15 @@ namespace UIButtonAPI
                 MelonLogger.Warning($"UIButtonAPI: Child '{childName}' not found on {parent.name}.");
                 return;
             }
-            var tmp = t.GetComponent<TextMeshProUGUI>();
-            if (tmp != null)
-                tmp.text = text;
-            else
-                MelonLogger.Warning($"UIButtonAPI: '{childName}' has no TextMeshProUGUI.");
+
+            var legacyText = t.GetComponent<Text>();
+            if (legacyText != null)
+            {
+                legacyText.text = text;
+                return;
+            }
+
+            MelonLogger.Warning($"UIButtonAPI: '{childName}' has no legacy Text component on {parent.name}.");
         }
 
         #endregion
