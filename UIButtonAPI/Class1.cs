@@ -68,6 +68,15 @@ namespace UIButtonAPI
         /// <summary>Fires when any toggle changes. Key = toggleID. Value = new bool state.</summary>
         public static Dictionary<int, UnityEvent<bool>> OnUIToggleChange = new Dictionary<int, UnityEvent<bool>>();
 
+        /// <summary>Fires when an input field is submitted. Key = inputID. Value = the submitted string.</summary>
+        public static Dictionary<int, UnityEvent<string>> OnUIInputSubmit = new Dictionary<int, UnityEvent<string>>();
+
+        // Callbacks that return the current value to pre-fill the input box when opened
+        private static Dictionary<int, System.Func<string>> _inputDefaults = new Dictionary<int, System.Func<string>>();
+
+        // Maps toggleID -> Toggle component so we can sync visual state after config load
+        private static Dictionary<int, Toggle> _toggleComponents = new Dictionary<int, Toggle>();
+
         /// <summary>True once the menu system has finished building. Poll this as a fallback.</summary>
         public static bool MainMenuReady = false;
 
@@ -124,6 +133,9 @@ namespace UIButtonAPI
             OnUIReady.RemoveAllListeners();
             OnUIButtonClick.Clear();
             OnUIToggleChange.Clear();
+            OnUIInputSubmit.Clear();
+            _inputDefaults.Clear();
+            _toggleComponents.Clear();
 
             MelonCoroutines.Start(WaitForLocalPlayer());
         }
@@ -422,6 +434,147 @@ namespace UIButtonAPI
             return SpawnButton(sub, gridX, gridY, text, buttonID);
         }
 
+
+        /// <summary>
+        /// Creates a button that opens the game's built-in Input Popup when clicked.
+        /// When the user submits, OnUIInputSubmit[inputID] fires with the entered string.
+        /// Pass subMenuID = -1 to place it on the mod's main menu.
+        ///
+        /// Example:
+        ///   UIButtonAPI.UIButtonAPI.MakeInputField(handle, localPlayer, _subMovement, 0, 3, "Set Speed", 800);
+        ///   UIButtonAPI.UIButtonAPI.OnUIInputSubmit[800] += val => { if (float.TryParse(val, out float f)) speed = f; };
+        /// </summary>
+        public static GameObject MakeInputField(ModHandle handle, GameObject localPlayer,
+            int subMenuID, int gridX, int gridY, string label, int inputID)
+        {
+            var panel = subMenuID < 0 ? handle?.MenuPanel : GetSubMenu(handle, subMenuID);
+            if (panel == null) { MelonLogger.Warning("UIButtonAPI: MakeInputField — invalid panel."); return null; }
+
+            if (!OnUIInputSubmit.ContainsKey(inputID))
+                OnUIInputSubmit[inputID] = new UnityEvent<string>();
+
+            // Spawn a regular button — we'll override its click handler
+            if (!OnUIButtonClick.ContainsKey(-inputID)) OnUIButtonClick[-inputID] = new UnityEvent();
+            GameObject btn = GameObject.Instantiate(_btnPrefab, panel.transform);
+            btn.transform.localPosition = GridToUnity(gridX, gridY);
+            SetText(btn, "ButtonText", label);
+
+            var btnComp = btn.GetComponent<Button>();
+            if (btnComp != null)
+            {
+                int id = inputID;
+                string lbl = label;
+                // defaultValueGetter is set after creation via SetInputDefault — null = empty
+                btnComp.onClick.AddListener(() =>
+                {
+                    string def = _inputDefaults.ContainsKey(id) ? _inputDefaults[id]() : "";
+                    OpenInputPopup(localPlayer, lbl, id, def);
+                });
+            }
+
+            MelonLogger.Msg($"UIButtonAPI: InputField '{label}' (ID={inputID}) at ({gridX},{gridY}).");
+            return btn;
+        }
+
+        /// <summary>
+        /// Opens the game's Input Popup, sets its title, wires submit to fire OnUIInputSubmit[inputID],
+        /// and closes via FadeOutAndDisable when submitted.
+        /// </summary>
+        public static void OpenInputPopup(GameObject localPlayer, string title, int inputID, string defaultValue = "")
+        {
+            if (localPlayer == null) { MelonLogger.Warning("UIButtonAPI: OpenInputPopup — no local player."); return; }
+
+            Transform popupRoot = localPlayer.transform.Find(
+                "Camera Offset/UI/Menu_Expanded/Input Popup (1)");
+            if (popupRoot == null) { MelonLogger.Warning("UIButtonAPI: 'Input Popup (1)' not found."); return; }
+
+            // Hide QM so it doesn't overlap the popup
+            Transform qm = localPlayer.transform.Find("Camera Offset/UI/Menu_Small/QM");
+            if (qm != null) qm.gameObject.SetActive(false);
+
+            popupRoot.gameObject.SetActive(true);
+
+            // Scale the popup to 1.84 on all axes
+            popupRoot.localScale = new Vector3(1.84f, 1.84f, 1.84f);
+
+            // Set title
+            Transform titleT = popupRoot.Find("InputPopup/TitleText");
+            if (titleT != null)
+            {
+                var txt = titleT.GetComponent<Text>();
+                if (txt != null) txt.text = title;
+            }
+
+            // Pre-fill InputField with the default/current value
+            Transform inputT = popupRoot.Find("InputPopup/InputField");
+            InputField inputField = inputT?.GetComponent<InputField>();
+            if (inputField != null) inputField.text = defaultValue;
+
+            // Wire submit button — clear previous listeners to avoid stacking across calls
+            Transform submitT = popupRoot.Find("InputPopup/ButtonCenter");
+            Button submitBtn = submitT?.GetComponent<Button>();
+            if (submitBtn != null)
+            {
+                submitBtn.onClick.RemoveAllListeners();
+                int id = inputID;
+                submitBtn.onClick.AddListener(() =>
+                {
+                    string value = inputField != null ? inputField.text : "";
+                    MelonLogger.Msg($"UIButtonAPI: Input submitted (ID={id}, value='{value}')");
+                    if (OnUIInputSubmit.ContainsKey(id)) OnUIInputSubmit[id]?.Invoke(value);
+
+                    // Restore QM
+                    if (qm != null) qm.gameObject.SetActive(true);
+
+                    // Close via FadeOutAndDisable if the component exists, else just disable
+                    bool faded = false;
+                    foreach (var mb in popupRoot.GetComponents<MonoBehaviour>())
+                    {
+                        var method = mb.GetType().GetMethod("FadeOutAndDisable");
+                        if (method != null) { method.Invoke(mb, null); faded = true; break; }
+                    }
+                    if (!faded) popupRoot.gameObject.SetActive(false);
+                });
+            }
+            else MelonLogger.Warning("UIButtonAPI: ButtonCenter not found on Input Popup.");
+        }
+
+        /// <summary>
+        /// Registers a callback that returns the current value to pre-fill the input box
+        /// when it is opened. Call this right after MakeInputField.
+        ///
+        /// Example:
+        ///   UIButtonAPI.UIButtonAPI.SetInputDefault(INPUT_SPEED, () => _speedMult.ToString("F1"));
+        /// </summary>
+        public static void SetInputDefault(int inputID, System.Func<string> getter)
+        {
+            _inputDefaults[inputID] = getter;
+        }
+
+        /// <summary>
+        /// Syncs a single toggle's visual isOn state to match a value — call after loading config.
+        /// This sets the toggle WITHOUT firing onValueChanged listeners.
+        ///
+        /// Example:
+        ///   UIButtonAPI.UIButtonAPI.SyncToggle(TGL_ESP, _esp);
+        /// </summary>
+        public static void SyncToggle(int toggleID, bool value)
+        {
+            if (!_toggleComponents.TryGetValue(toggleID, out Toggle tog) || tog == null) return;
+            tog.SetIsOnWithoutNotify(value);
+        }
+
+        /// <summary>
+        /// Syncs multiple toggles at once. Pass pairs of (toggleID, value).
+        /// Example:
+        ///   UIButtonAPI.UIButtonAPI.SyncToggles((TGL_ESP, _esp), (TGL_FLY, _fly));
+        /// </summary>
+        public static void SyncToggles(params (int id, bool value)[] pairs)
+        {
+            foreach (var (id, value) in pairs)
+                SyncToggle(id, value);
+        }
+
         /// <summary>Adds a toggle inside a sub-menu.</summary>
         public static GameObject MakeToggleInSubMenu(ModHandle handle, int subMenuID, int gridX, int gridY, string text, int toggleID)
         {
@@ -453,7 +606,12 @@ namespace UIButtonAPI
             obj.transform.localPosition = GridToUnity(gridX, gridY);
             SetText(obj, "ButtonText", text);
             var comp = obj.GetComponent<Toggle>();
-            if (comp != null) { int id = toggleID; comp.onValueChanged.AddListener(isOn => OnUIToggleChange[id]?.Invoke(isOn)); }
+            if (comp != null)
+            {
+                int id = toggleID;
+                _toggleComponents[id] = comp;
+                comp.onValueChanged.AddListener(isOn => OnUIToggleChange[id]?.Invoke(isOn));
+            }
             return obj;
         }
 
