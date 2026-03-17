@@ -43,6 +43,7 @@ namespace UIButtonAPI
     {
         public int ID;           // unique index assigned at registration
         public string Name;         // display name shown on shortcut button
+        public int IdOffset;     // auto ID offset — all button/toggle IDs are shifted by this amount
 
         // Shortcut button position.
         // If ShortcutGridX is int.MinValue the button is auto-stacked vertically at (-1, ID).
@@ -206,6 +207,7 @@ namespace UIButtonAPI
                 Name = name,
                 ShortcutGridX = shortcutGridX,
                 ShortcutGridY = shortcutGridY,
+                IdOffset = _handles.Count * 10000,
             };
             _handles.Add(handle);
             _pendingHandles.Add(handle);
@@ -444,14 +446,14 @@ namespace UIButtonAPI
         public static GameObject MakeButton(ModHandle handle, int gridX, int gridY, string text, int buttonID)
         {
             if (handle?.MenuPanel == null) { MelonLogger.Warning($"UIButtonAPI: MakeButton called before UI ready."); return null; }
-            return SpawnButton(handle.MenuPanel, gridX, gridY, text, buttonID);
+            return SpawnButton(handle.MenuPanel, gridX, gridY, text, buttonID, handle.IdOffset);
         }
 
         /// <summary>Adds a toggle to the mod's MAIN menu.</summary>
         public static GameObject MakeToggle(ModHandle handle, int gridX, int gridY, string text, int toggleID)
         {
             if (handle?.MenuPanel == null) { MelonLogger.Warning($"UIButtonAPI: MakeToggle called before UI ready."); return null; }
-            return SpawnToggle(handle.MenuPanel, gridX, gridY, text, toggleID);
+            return SpawnToggle(handle.MenuPanel, gridX, gridY, text, toggleID, handle.IdOffset);
         }
 
         /// <summary>Adds a button inside a sub-menu.</summary>
@@ -579,6 +581,40 @@ namespace UIButtonAPI
             _inputDefaults[inputID] = getter;
         }
 
+        /// <summary>Sets a default value getter for an input field, applying the mod's ID offset.</summary>
+        public static void SetInputDefault(ModHandle handle, int inputID, System.Func<string> getter)
+        {
+            _inputDefaults[inputID + (handle?.IdOffset ?? 0)] = getter;
+        }
+
+        /// <summary>
+        /// Gets the offset-adjusted button click event for a mod's button ID.
+        /// Use this instead of OnUIButtonClick[id] to avoid cross-mod conflicts.
+        ///   UIButtonAPI.GetButtonEvent(handle, BTN_MY_BTN).AddListener(() => DoThing());
+        /// </summary>
+        public static UnityEvent GetButtonEvent(ModHandle handle, int buttonID)
+        {
+            int globalID = buttonID + (handle?.IdOffset ?? 0);
+            if (!OnUIButtonClick.ContainsKey(globalID)) OnUIButtonClick[globalID] = new UnityEvent();
+            return OnUIButtonClick[globalID];
+        }
+
+        /// <summary>Gets the offset-adjusted toggle change event for a mod's toggle ID.</summary>
+        public static UnityEvent<bool> GetToggleEvent(ModHandle handle, int toggleID)
+        {
+            int globalID = toggleID + (handle?.IdOffset ?? 0);
+            if (!OnUIToggleChange.ContainsKey(globalID)) OnUIToggleChange[globalID] = new UnityEvent<bool>();
+            return OnUIToggleChange[globalID];
+        }
+
+        /// <summary>Gets the offset-adjusted input submit event for a mod's input ID.</summary>
+        public static UnityEvent<string> GetInputEvent(ModHandle handle, int inputID)
+        {
+            int globalID = inputID + (handle?.IdOffset ?? 0);
+            if (!OnUIInputSubmit.ContainsKey(globalID)) OnUIInputSubmit[globalID] = new UnityEvent<string>();
+            return OnUIInputSubmit[globalID];
+        }
+
         /// <summary>
         /// Syncs a single toggle's visual isOn state to match a value — call after loading config.
         /// This sets the toggle WITHOUT firing onValueChanged listeners.
@@ -592,11 +628,24 @@ namespace UIButtonAPI
             tog.SetIsOnWithoutNotify(value);
         }
 
+        /// <summary>Sync a toggle using a handle — automatically applies the mod's ID offset.</summary>
+        public static void SyncToggle(ModHandle handle, int toggleID, bool value)
+        {
+            SyncToggle(toggleID + (handle?.IdOffset ?? 0), value);
+        }
+
         /// <summary>
-        /// Syncs multiple toggles at once. Pass pairs of (toggleID, value).
-        /// Example:
-        ///   UIButtonAPI.UIButtonAPI.SyncToggles((TGL_ESP, _esp), (TGL_FLY, _fly));
+        /// Syncs multiple toggles at once using a handle for auto ID offset.
+        /// Pass pairs of (toggleID, value).
         /// </summary>
+        public static void SyncToggles(ModHandle handle, params (int id, bool value)[] pairs)
+        {
+            int offset = handle?.IdOffset ?? 0;
+            foreach (var (id, value) in pairs)
+                SyncToggle(id + offset, value);
+        }
+
+        /// <summary>Legacy overload — no offset applied. Use the ModHandle overload instead.</summary>
         public static void SyncToggles(params (int id, bool value)[] pairs)
         {
             foreach (var (id, value) in pairs)
@@ -608,7 +657,7 @@ namespace UIButtonAPI
         {
             var sub = GetSubMenu(handle, subMenuID);
             if (sub == null) { MelonLogger.Warning($"UIButtonAPI: MakeToggleInSubMenu — invalid subID {subMenuID}."); return null; }
-            return SpawnToggle(sub, gridX, gridY, text, toggleID);
+            return SpawnToggle(sub, gridX, gridY, text, toggleID, handle?.IdOffset ?? 0);
         }
 
         #endregion
@@ -757,7 +806,7 @@ namespace UIButtonAPI
         {
             var page = GetBigPage(handle, pageID);
             if (page == null || _bigBtnPrefab == null) { MelonLogger.Warning("UIButtonAPI: MakeBigButton — invalid page or missing prefab."); return null; }
-            return SpawnBigButton(page, col, row, text, buttonID);
+            return SpawnBigButton(page, col, row, text, buttonID, handle?.IdOffset ?? 0);
         }
 
         /// <summary>Adds a toggle to a big page at grid (col, row).</summary>
@@ -765,7 +814,7 @@ namespace UIButtonAPI
         {
             var page = GetBigPage(handle, pageID);
             if (page == null || _bigTogglePrefab == null) { MelonLogger.Warning("UIButtonAPI: MakeBigToggle — invalid page or missing prefab."); return null; }
-            return SpawnBigToggle(page, col, row, text, toggleID);
+            return SpawnBigToggle(page, col, row, text, toggleID, handle?.IdOffset ?? 0);
         }
 
         /// <summary>Adds a text comment label to a big page at grid (col, row).</summary>
@@ -818,54 +867,58 @@ namespace UIButtonAPI
 
         #region Internal Helpers
 
-        private static GameObject SpawnButton(GameObject panel, int gridX, int gridY, string text, int buttonID)
+        private static GameObject SpawnButton(GameObject panel, int gridX, int gridY, string text, int buttonID, int idOffset = 0)
         {
-            if (!OnUIButtonClick.ContainsKey(buttonID)) OnUIButtonClick[buttonID] = new UnityEvent();
+            int globalID = buttonID + idOffset;
+            if (!OnUIButtonClick.ContainsKey(globalID)) OnUIButtonClick[globalID] = new UnityEvent();
             GameObject btn = GameObject.Instantiate(_btnPrefab, panel.transform);
             btn.transform.localPosition = GridToUnity(gridX, gridY);
             SetText(btn, "ButtonText", text);
             var comp = btn.GetComponent<Button>();
-            if (comp != null) { int id = buttonID; comp.onClick.AddListener(() => OnUIButtonClick[id]?.Invoke()); }
+            if (comp != null) { int id = globalID; comp.onClick.AddListener(() => OnUIButtonClick[id]?.Invoke()); }
             return btn;
         }
 
-        private static GameObject SpawnToggle(GameObject panel, int gridX, int gridY, string text, int toggleID)
+        private static GameObject SpawnToggle(GameObject panel, int gridX, int gridY, string text, int toggleID, int idOffset = 0)
         {
-            if (!OnUIToggleChange.ContainsKey(toggleID)) OnUIToggleChange[toggleID] = new UnityEvent<bool>();
+            int globalID = toggleID + idOffset;
+            if (!OnUIToggleChange.ContainsKey(globalID)) OnUIToggleChange[globalID] = new UnityEvent<bool>();
             GameObject obj = GameObject.Instantiate(_togglePrefab, panel.transform);
             obj.transform.localPosition = GridToUnity(gridX, gridY);
             SetText(obj, "ButtonText", text);
             var comp = obj.GetComponent<Toggle>();
             if (comp != null)
             {
-                int id = toggleID;
+                int id = globalID;
                 _toggleComponents[id] = comp;
                 comp.onValueChanged.AddListener(isOn => OnUIToggleChange[id]?.Invoke(isOn));
             }
             return obj;
         }
 
-        private static GameObject SpawnBigButton(GameObject page, int col, int row, string text, int buttonID)
+        private static GameObject SpawnBigButton(GameObject page, int col, int row, string text, int buttonID, int idOffset = 0)
         {
-            if (!OnUIButtonClick.ContainsKey(buttonID)) OnUIButtonClick[buttonID] = new UnityEvent();
+            int globalID = buttonID + idOffset;
+            if (!OnUIButtonClick.ContainsKey(globalID)) OnUIButtonClick[globalID] = new UnityEvent();
             GameObject btn = GameObject.Instantiate(_bigBtnPrefab, page.transform);
             btn.transform.localPosition = BigGridToUnity(col, row);
             SetTMP(btn, "ButtonText", text);
             var comp = btn.GetComponent<Button>();
-            if (comp != null) { int id = buttonID; comp.onClick.AddListener(() => OnUIButtonClick[id]?.Invoke()); }
+            if (comp != null) { int id = globalID; comp.onClick.AddListener(() => OnUIButtonClick[id]?.Invoke()); }
             return btn;
         }
 
-        private static GameObject SpawnBigToggle(GameObject page, int col, int row, string text, int toggleID)
+        private static GameObject SpawnBigToggle(GameObject page, int col, int row, string text, int toggleID, int idOffset = 0)
         {
-            if (!OnUIToggleChange.ContainsKey(toggleID)) OnUIToggleChange[toggleID] = new UnityEvent<bool>();
+            int globalID = toggleID + idOffset;
+            if (!OnUIToggleChange.ContainsKey(globalID)) OnUIToggleChange[globalID] = new UnityEvent<bool>();
             GameObject obj = GameObject.Instantiate(_bigTogglePrefab, page.transform);
             obj.transform.localPosition = BigGridToUnity(col, row);
             SetTMP(obj, "ButtonText", text);
             var comp = obj.GetComponent<Toggle>();
             if (comp != null)
             {
-                int id = toggleID;
+                int id = globalID;
                 _toggleComponents[id] = comp;
                 comp.onValueChanged.AddListener(isOn => OnUIToggleChange[id]?.Invoke(isOn));
             }
