@@ -11,7 +11,6 @@
 //
 //  3. Add buttons and toggles using the handle:
 //       UIButtonAPI.UIButtonAPI.MakeButton(handle, 0, 0, "Say Hi", 1);
-//       UIButtonAPI.UIButtonAPI.OnUIButtonClick[1] += () => MelonLogger.Msg("Hi!");
 //
 //  4. Create sub-menus:
 //       int sub = UIButtonAPI.UIButtonAPI.CreateSubMenu(handle, "Settings");
@@ -123,7 +122,6 @@ namespace UIButtonAPI
 
         public override void OnApplicationStart()
         {
-            MelonLogger.Msg("UIButtonAPI v3.0 loaded — multi-mod support.");
         }
 
         public override void OnSceneWasLoaded(int buildIndex, string sceneName)
@@ -211,8 +209,6 @@ namespace UIButtonAPI
             };
             _handles.Add(handle);
             _pendingHandles.Add(handle);
-            MelonLogger.Msg($"UIButtonAPI: Registered mod '{name}' (ID={handle.ID}, " +
-                $"shortcut={(shortcutGridX == int.MinValue ? "auto-stack" : $"({shortcutGridX},{shortcutGridY})")})");
             return handle;
         }
 
@@ -223,7 +219,6 @@ namespace UIButtonAPI
 
         private static System.Collections.IEnumerator WaitForLocalPlayer()
         {
-            MelonLogger.Msg("UIButtonAPI: Waiting for local player...");
             while (_localPlayer == null)
             {
                 foreach (var go in GameObject.FindObjectsOfType<GameObject>())
@@ -306,14 +301,12 @@ namespace UIButtonAPI
                         comp.onClick.AddListener(() => ToggleMainMenu(h));
                     }
 
-                    MelonLogger.Msg($"UIButtonAPI: Built menu for '{handle.Name}' at shortcut ({bx},{by}).");
                 }
             }
 
             _pendingHandles.Clear();
             _uiBuilt = true;
             MainMenuReady = true;
-            MelonLogger.Msg("UIButtonAPI: Ready — firing OnUIReady.");
             OnUIReady?.Invoke();
         }
 
@@ -352,7 +345,6 @@ namespace UIButtonAPI
             handle.IsOpen = true;
 
             if (_shortcutMenu != null) _shortcutMenu.gameObject.SetActive(false);
-            MelonLogger.Msg($"UIButtonAPI: Opened '{handle.Name}'");
         }
 
         private static void CloseMainMenu(ModHandle handle)
@@ -365,7 +357,6 @@ namespace UIButtonAPI
             foreach (var h in _handles) if (h.IsOpen) { anyOpen = true; break; }
             if (!anyOpen && _shortcutMenu != null) _shortcutMenu.gameObject.SetActive(true);
 
-            MelonLogger.Msg($"UIButtonAPI: Closed '{handle.Name}'");
         }
 
         #endregion
@@ -402,7 +393,6 @@ namespace UIButtonAPI
             int id = handle.SubMenus.Count - 1;
 
             AddBackButton(sub, backAction);
-            MelonLogger.Msg($"UIButtonAPI: Sub-menu '{title}' created for '{handle.Name}' (subID={id}).");
             return id;
         }
 
@@ -502,7 +492,6 @@ namespace UIButtonAPI
                 });
             }
 
-            MelonLogger.Msg($"UIButtonAPI: InputField '{label}' (ID={inputID}) at ({gridX},{gridY}).");
             return btn;
         }
 
@@ -550,7 +539,6 @@ namespace UIButtonAPI
                 submitBtn.onClick.AddListener(() =>
                 {
                     string value = inputField != null ? inputField.text : "";
-                    MelonLogger.Msg($"UIButtonAPI: Input submitted (ID={id}, value='{value}')");
                     if (OnUIInputSubmit.ContainsKey(id)) OnUIInputSubmit[id]?.Invoke(value);
 
                     // Restore QM
@@ -719,14 +707,12 @@ namespace UIButtonAPI
                 {
                     ModHandle h = handle;
                     btn.onClick.AddListener(() => CloseBigMenu(h));
-                    MelonLogger.Msg($"UIButtonAPI: Hooked close button '{btn.gameObject.name}' on big page '{title}'.");
                     break;
                 }
             }
 
             int id = handle.BigPages.Count;
             handle.BigPages.Add(page);
-            MelonLogger.Msg($"UIButtonAPI: BigPage '{title}' created for '{handle.Name}' (pageID={id}).");
             return id;
         }
 
