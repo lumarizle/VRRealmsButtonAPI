@@ -42,6 +42,8 @@ using Photon.Pun;
 namespace UIButtonAPI
 {
     // ── ModHandle ──────────────────────────────────────────────────────
+    public enum ArrowDir { Right, Left, Up, Down }
+
     public class ModHandle
     {
         public int ID;
@@ -74,6 +76,7 @@ namespace UIButtonAPI
         // Prefabs
         private static GameObject _btnPrefab;
         private static GameObject _togglePrefab;
+        private static GameObject _btnArrowRight, _btnArrowLeft, _btnArrowUp, _btnArrowDown;
         private static GameObject _bigBtnPrefab;
         private static GameObject _bigTogglePrefab;
         private static GameObject _bigPagePrefab;
@@ -105,6 +108,7 @@ namespace UIButtonAPI
             _shortcutMenu = null;
             _btnPrefab = _togglePrefab = null;
             _bigBtnPrefab = _bigTogglePrefab = _bigPagePrefab = _bigCommentPrefab = null;
+            _btnArrowRight = _btnArrowLeft = _btnArrowUp = _btnArrowDown = null;
 
             foreach (var h in _handles)
             {
@@ -172,6 +176,10 @@ namespace UIButtonAPI
             _bigTogglePrefab = Resources.Load<GameObject>("OLD_BIGMENUTOGGLE");
             _bigPagePrefab = Resources.Load<GameObject>("OLD_BIGMENUPAGE");
             _bigCommentPrefab = Resources.Load<GameObject>("OLD_BIGMENUCOMMENT");
+            _btnArrowRight = Resources.Load<GameObject>("OLD_BUTTONARROWRIGHT");
+            _btnArrowLeft = Resources.Load<GameObject>("OLD_BUTTONARROWLEFT");
+            _btnArrowUp = Resources.Load<GameObject>("OLD_BUTTONARROWUP");
+            _btnArrowDown = Resources.Load<GameObject>("OLD_BUTTONARROWDOWN");
 
             if (menuPrefab == null || _btnPrefab == null || _togglePrefab == null)
             {
@@ -336,6 +344,21 @@ namespace UIButtonAPI
                 OpenInputPopup(localPlayer, label, onSubmit, def);
             });
             return btn;
+        }
+
+
+        /// <summary>
+        /// Spawns an arrow button (no text) on any panel or sub-menu GameObject.
+        /// Get the panel via h.MenuPanel or GetSubMenu(h, subID).
+        ///
+        /// Example:
+        ///   var panel = UIButtonAPI.UIButtonAPI.GetSubMenu(_h, _subPlayerList);
+        ///   UIButtonAPI.UIButtonAPI.MakeArrowButton(panel, 0, 2, ArrowDir.Left, () => PrevPage());
+        /// </summary>
+        public static GameObject MakeArrowButton(GameObject panel, int col, int row, ArrowDir dir, System.Action onClick)
+        {
+            if (panel == null) { MelonLogger.Warning("UIButtonAPI: MakeArrowButton — null panel."); return null; }
+            return SpawnArrow(panel, col, row, dir, onClick);
         }
 
         /// <summary>Sets a toggle's visual isOn state without firing its onChange callback.</summary>
@@ -507,6 +530,23 @@ namespace UIButtonAPI
         // ══════════════════════════════════════════════════════════════
         //  INTERNAL HELPERS
         // ══════════════════════════════════════════════════════════════
+
+        private static GameObject SpawnArrow(GameObject panel, int col, int row, ArrowDir dir, System.Action onClick)
+        {
+            GameObject prefab;
+            switch (dir)
+            {
+                case ArrowDir.Left: prefab = _btnArrowLeft; break;
+                case ArrowDir.Up: prefab = _btnArrowUp; break;
+                case ArrowDir.Down: prefab = _btnArrowDown; break;
+                default: prefab = _btnArrowRight; break;
+            }
+            if (prefab == null) { MelonLogger.Warning($"UIButtonAPI: Arrow prefab for {dir} not loaded."); return null; }
+            var btn = GameObject.Instantiate(prefab, panel.transform);
+            btn.transform.localPosition = GridToUnity(col, row);
+            if (onClick != null) btn.GetComponent<Button>()?.onClick.AddListener(() => onClick());
+            return btn;
+        }
 
         private static GameObject SpawnButton(GameObject panel, int col, int row, string text, System.Action onClick)
         {
