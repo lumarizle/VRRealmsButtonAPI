@@ -208,7 +208,7 @@ namespace UIButtonAPI
         private static void AddBackButton(GameObject panel, System.Action onBack)
         {
             var btn = GameObject.Instantiate(_btnPrefab, panel.transform);
-            btn.transform.localPosition = GridToUnity(3, 2);
+            btn.transform.localPosition = GridToUnity(4, 2);
             SetText(btn, "ButtonText", "Back");
             btn.GetComponent<Button>()?.onClick.AddListener(() => onBack());
         }
@@ -299,10 +299,10 @@ namespace UIButtonAPI
         }
 
         /// <summary>Adds a toggle to the mod's main menu. Returns the GO so you can call SyncToggle on it.</summary>
-        public static GameObject MakeToggle(ModHandle h, int col, int row, string text, System.Action<bool> onChange)
+        public static GameObject MakeToggle(ModHandle h, int col, int row, string text, System.Action<bool> onChange, bool DefState = false)
         {
             if (h?.MenuPanel == null) { MelonLogger.Warning("UIButtonAPI: MakeToggle called before UI ready."); return null; }
-            return SpawnToggle(h.MenuPanel, col, row, text, onChange);
+            return SpawnToggle(h.MenuPanel, col, row, text, onChange, DefState);
         }
 
         /// <summary>Adds a button inside a sub-menu.</summary>
@@ -314,11 +314,11 @@ namespace UIButtonAPI
         }
 
         /// <summary>Adds a toggle inside a sub-menu.</summary>
-        public static GameObject MakeToggleInSubMenu(ModHandle h, int subID, int col, int row, string text, System.Action<bool> onChange)
+        public static GameObject MakeToggleInSubMenu(ModHandle h, int subID, int col, int row, string text, System.Action<bool> onChange, bool DefState = false)
         {
             var sub = GetSubMenu(h, subID);
             if (sub == null) { MelonLogger.Warning("UIButtonAPI: MakeToggleInSubMenu — invalid subID."); return null; }
-            return SpawnToggle(sub, col, row, text, onChange);
+            return SpawnToggle(sub, col, row, text, onChange, DefState);
         }
 
         /// <summary>Adds an input field button. Opens the game's Input Popup on click.</summary>
@@ -468,11 +468,11 @@ namespace UIButtonAPI
         }
 
         /// <summary>Adds a toggle to a big page. Returns the GO for SyncToggle.</summary>
-        public static GameObject MakeBigToggle(ModHandle h, int pageID, int col, int row, string text, System.Action<bool> onChange)
+        public static GameObject MakeBigToggle(ModHandle h, int pageID, int col, int row, string text, System.Action<bool> onChange, bool Defstate = false)
         {
             var page = GetBigPage(h, pageID);
             if (page == null || _bigTogglePrefab == null) { MelonLogger.Warning("UIButtonAPI: MakeBigToggle failed."); return null; }
-            return SpawnBigToggle(page, col, row, text, onChange);
+            return SpawnBigToggle(page, col, row, text, onChange, Defstate);
         }
 
         /// <summary>Adds a comment label to a big page.</summary>
@@ -517,13 +517,13 @@ namespace UIButtonAPI
             return btn;
         }
 
-        private static GameObject SpawnToggle(GameObject panel, int col, int row, string text, System.Action<bool> onChange)
+        private static GameObject SpawnToggle(GameObject panel, int col, int row, string text, System.Action<bool> onChange, bool defState = false)
         {
             var obj = GameObject.Instantiate(_togglePrefab, panel.transform);
             obj.transform.localPosition = GridToUnity(col, row);
             SetText(obj, "ButtonText", text);
             var comp = obj.GetComponent<Toggle>();
-            if (comp != null && onChange != null) comp.onValueChanged.AddListener(isOn => onChange(isOn));
+            if (comp != null) { comp.isOn = defState; if (onChange != null) comp.onValueChanged.AddListener(isOn => onChange(isOn)); }
             return obj;
         }
 
@@ -536,13 +536,13 @@ namespace UIButtonAPI
             return btn;
         }
 
-        private static GameObject SpawnBigToggle(GameObject page, int col, int row, string text, System.Action<bool> onChange)
+        private static GameObject SpawnBigToggle(GameObject page, int col, int row, string text, System.Action<bool> onChange, bool defState = false)
         {
             var obj = GameObject.Instantiate(_bigTogglePrefab, page.transform);
             obj.transform.localPosition = BigGridToUnity(col, row);
             SetTMP(obj, "ButtonText", text);
             var comp = obj.GetComponent<Toggle>();
-            if (comp != null && onChange != null) comp.onValueChanged.AddListener(isOn => onChange(isOn));
+            if (comp != null) { comp.isOn = defState; if (onChange != null) comp.onValueChanged.AddListener(isOn => onChange(isOn)); }
             return obj;
         }
 
